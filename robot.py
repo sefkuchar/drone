@@ -15,7 +15,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Názov aplikácie podľa tvojho dizajnu
 st.title("UAV Active Tracking Platform")
 st.markdown("---")
 
@@ -23,7 +22,7 @@ st.markdown("---")
 @st.cache_resource
 def load_resources():
     model = YOLO('yolov8n.pt')
-    model.to("cpu")  # Cloud servery nemajú GPU, vynútime stabilné CPU
+    model.to("cpu")  # Vynútené stabilné CPU pre cloud servery bez GPU
     return model
 
 model = load_resources()
@@ -52,34 +51,60 @@ class TrajectoryPredictor:
 def evaluate_reward(error_x, error_y, confidence):
     return (confidence * 2.5) - (np.sqrt(error_x**2 + error_y**2) * 0.0015)
 
+# Lokálny generátor testovacieho videa (100% nezávislý od internetových linkov)
+def generate_default_scenario(filename):
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(filename, fourcc, 30.0, (640, 360))
+    for i in range(120):
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        cx = int(80 + i * 4)
+        cy = 200
+        # Simulácia schovania objektu (zákryt) medzi snímkami 50 a 85
+        if not (50 <= i <= 85):
+            cv2.circle(frame, (cx, cy-40), 15, (200, 200, 200), -1)
+            cv2.rectangle(frame, (cx-10, cy-25), (cx+10, cy+20), (200, 200, 200), -1)
+            cv2.line(frame, (cx-5, cy+20), (cx-5, cy+50), (200, 200, 200), 4)
+            cv2.line(frame, (cx+5, cy+20), (cx+5, cy+50), (200, 200, 200), 4)
+        else:
+            cv2.rectangle(frame, (260, 0), (380, 360), (60, 60, 60), -1)
+            cv2.putText(frame, "PREKAZKA", (280, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        out.write(frame)
+    out.release()
+
 # ==============================================================================
-# OVLÁDACÍ PANEL I VSTUPY (Presne podľa tvojho screenshotu)
+# OVLÁDACÍ PANEL I VSTUPY
 # ==============================================================================
 st.sidebar.header("Ovladaci Panel i Vstupy")
 
 input_type = st.sidebar.radio(
     "Vyberte typ vstupu:", 
-    ["Nahrat vlastne video", "YouTube Link"]
+    ["Ukazkove video (Default)", "Nahrat vlastne video", "YouTube Link"]
 )
 
 video_source = None
 
-if input_type == "Nahrat vlastne video":
+if input_type == "Ukazkove video (Default)":
+    video_source = "temp_default_scene.mp4"
+    if st.sidebar.button("Pripravit defaultne video"):
+        with st.spinner("Generujem integrovanú simuláciu..."):
+            generate_default_scenario(video_source)
+        st.sidebar.success("Defaultné video bolo pripravené na disk.")
+
+elif input_type == "Nahrat vlastne video":
     uploaded_file = st.sidebar.file_uploader("Nahrajte MP4 video:", type=["mp4", "avi", "mov"])
     if uploaded_file:
-        video_source = "input_video.mp4"
+        video_source = "user_input_video.mp4"
         with open(video_source, "wb") as f:
             f.write(uploaded_file.read())
             
 elif input_type == "YouTube Link":
-    yt_url = st.sidebar.text_input("Zadajte YouTube URL adresu:", value="https://www.youtube.com/shorts/YdpN9")
+    yt_url = st.sidebar.text_input("Zadajte YouTube URL adresu:", value="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     if yt_url:
-        video_source = "input_video.mp4"
-        # Tlačidlo presne podľa teba
+        video_source = "youtube_downloaded.mp4"
         if st.sidebar.button("Stiahnut a analyzovat YouTube stream"):
-            with st.spinner("Sťahujem video z YouTube..."):
+            with st.spinner("Sťahujem stream zo siete YouTube (môže to trvať minútu)..."):
                 ydl_opts = {
-                    'format': 'mp4[height=360]/mp4[height<=480]', # Nízke rozlíšenie pre plynulosť cloudu
+                    'format': 'mp4[height<=360]', # Nízka kvalita pre optimálnu cloud pamäť
                     'outtmpl': video_source,
                     'overwrites': True,
                     'quiet': True,
@@ -87,16 +112,16 @@ elif input_type == "YouTube Link":
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         ydl.download([yt_url])
-                    st.sidebar.success("Video z YouTube stiahnuté.")
+                    st.sidebar.success("Video úspešne stiahnuté a pripravené.")
                 except Exception as e:
-                    st.sidebar.error(f"Chyba sťahovania: {e}")
+                    st.sidebar.error(f"Sťahovanie zlyhalo: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("Nastavenia filtrov")
 frame_skip = st.sidebar.slider("Frame Skip (Uspora CPU)", min_value=1, max_value=10, value=3)
 
 # ==============================================================================
-# ROZLOZENIE STRÁNKY (LAYOUT - PREDPRIPRAVENÉ PODĽA TVOJHO VIZUÁLU)
+# ROZLOZENIE STRÁNKY (LAYOUT)
 # ==============================================================================
 col1, col2 = st.columns([2, 1])
 
@@ -111,41 +136,35 @@ with col2:
     st.subheader("Telemetria a Vypocty")
     telemetry_placeholder = st.empty()
 
-# Vykreslenie východiskových prázdnych stavov, aby stránka nevyzerala prázdna
+# Inicializácia statických prázdnych obrazoviek pre čistý vizuálny štart
 SEARCH_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
 cv2.putText(SEARCH_SCREEN, "SEARCHING...", (25, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
 
-# Texty na spodku pravej strany
 explanation_text = """
+***
 **Vysvetlenie telemetrickych velicin:**
 
-* **Stav systemu:** Aktualny rezim riadenia UAV. *TRACKING ACTIVE* znamena stabilne zameranie. *ACTIVE VISION* deteguje pokles istoty a simuluje orbitalny manever pre lepsi uhol pohladu. *PREDIKCIA* znamena, ze objekt je skryty a dron leti podla zotrvacnosti linearneho filtra.
-* **Confidence (Istota AI):** Vyjadruje percentualnu istotu detekcneho modelu YOLOv8.
+* **Stav systemu:** Regionalny rezim riadenia UAV. *TRACKING ACTIVE* znamena stabilne zameranie. *ACTIVE VISION* deteguje pokles istoty a simuluje orbitalny manever pre lepsi uhol pohladu. *PREDIKCIA* znamena, ze objekt je skryty a dron leti podla zotrvacnosti linearneho filtra.
+* **Confidence (Istota AI):** Vyjadruje percentualnu istotu detekcneho modelu YOLOv8, ze dany objekt je naozaj hladany clovek.
+* **RL Reward (Skore odmeny):** Matematicky vystup z odmenovacej funkcie pre posilnovane ucenie ($R = R_{conf} - P_{dist}$).
+* **Error X/Y (Odchylka od stredu):** Diferencia objektu od optickeho stredu senzora v pixeloch.
 """
-st.markdown("---")
+st.markdown(explanation_text)
+
+start_button = st.button("Spustiť sledovanie objektu")
 
 # ==============================================================================
-# SPRACOVANIE VIDEA A ZÁPIS (ZABRAŇUJE CHYBE MEDIAFILESTORAGEERROR)
+# SPRACOVANIE A PLYNULÉ VYKRESLENIE STREAMU (ZABRAŇUJE CHYBE COMPRESSION ERROR)
 # ==============================================================================
-if st.button("Spustiť analýzu a generovanie výstupu"):
+if start_button:
     if not video_source or not os.path.exists(video_source):
-        st.error("Chyba: Najskôr pridaj/stiahni video v bočnom paneli!")
+        st.error("Chyba: Vstupný zdroj nie je pripravený. Kliknite najskôr na tlačidlo pre prípravu/stiahnutie v bočnom paneli!")
     else:
         cap = cv2.VideoCapture(video_source)
         if not cap.isOpened():
-            st.error("Nepodarilo sa otvoriť vstupné video.")
+            st.error("Chyba pri inicializácii video streamu.")
         else:
-            output_path = "output_processed.mp4"
-            
-            # Odstránenie starého súboru ak existuje
-            if os.path.exists(output_path):
-                os.remove(output_path)
-                
-            # Použitie vysoko kompatibilného MJPEG/MP4V pre bezpečné ukladanie na cloude
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-            out_writer = cv2.VideoWriter(output_path, fourcc, 20.0, (640, 360))
-            
             FRAME_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             if FRAME_WIDTH == 0: FRAME_WIDTH, FRAME_HEIGHT = 640, 360
@@ -153,33 +172,25 @@ if st.button("Spustiť analýzu a generovanie výstupu"):
             CENTER_X, CENTER_Y = 640 // 2, 360 // 2
             predictor = TrajectoryPredictor()
             occlusion_counter = 0
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0: total_frames = 100
-            
             current_frame_idx = 0
-            frames_written = 0
             
+            PRED_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
+            cv2.putText(PRED_SCREEN, "PREDICTING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
                 
                 current_frame_idx += 1
                 
-                # Rešpektovanie posuvníka Frame Skip na úsporu CPU
+                # Filter Frame Skip pre úsporu výkonu cloudu
                 if current_frame_idx % frame_skip != 0:
                     continue
-                
-                progress_bar.progress(min(current_frame_idx / total_frames, 1.0))
-                status_text.text(f"Spracovávam snímku {current_frame_idx} / {total_frames}...")
                 
                 web_frame = cv2.resize(frame, (640, 360))
                 found = False
 
-                # YOLOv8 hľadanie človeka (trieda 0)
+                # YOLOv8 Detekcia osôb (trieda 0)
                 results = model(web_frame, imgsz=320, verbose=False)
                 for box in results[0].boxes:
                     if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.20:
@@ -197,7 +208,7 @@ if st.button("Spustiť analýzu a generovanie výstupu"):
                         cv2.rectangle(web_frame, (x1, y1), (x2, y2), color, 2)
                         cv2.putText(web_frame, status, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
                         
-                        # Aktualizácia detailného výrezu pre telemetriu
+                        # Detailný výrez ROI
                         crop = web_frame[max(0, y1-15):min(360, y2+15), max(0, x1-15):min(640, x2+15)]
                         if crop.size > 0:
                             zoom_placeholder.image(cv2.resize(crop, (150, 150)), channels="BGR")
@@ -212,7 +223,7 @@ if st.button("Spustiť analýzu a generovanie výstupu"):
                         occlusion_counter = 0
                         break
 
-                # Predikcia lineárnym filtrom pri strate kontaktu
+                # Lineárny prediktívny filter (Ak sa cieľ stratil)
                 if not found:
                     prediction = predictor.predict_next()
                     if prediction and occlusion_counter < 30:
@@ -223,10 +234,7 @@ if st.button("Spustiť analýzu a generovanie výstupu"):
                         cv2.circle(web_frame, (px, py), 10, (0, 255, 255), 2)
                         cv2.putText(web_frame, f"PREDIKCIA ({occlusion_counter})", (px+15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                         
-                        PRED_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
-                        cv2.putText(PRED_SCREEN, "PREDICTING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                         zoom_placeholder.image(PRED_SCREEN, channels="BGR")
-                        
                         telemetry_placeholder.markdown(f"""
 * **Stav systemu:** `PREDIKCIA (STRATA KONTAKTU)` 
 * **Snímky naslepo:** `{occlusion_counter} / 30`
@@ -241,21 +249,11 @@ if st.button("Spustiť analýzu a generovanie výstupu"):
 * **RL Reward (Skore odmeny):** `N/A`
 """)
                 
-                out_writer.write(web_frame)
-                frames_written += 1
+                # Plynulý výstup na obrazovku v reálnom čase bez potreby ukladania súborov
+                main_placeholder.image(web_frame, channels="BGR", use_container_width=True)
+                
+                # Fixácia plynulého vykresľovania frekvencie snímok na webe
+                time.sleep(0.02)
                 
             cap.release()
-            out_writer.release()
-            
-            progress_bar.empty()
-            status_text.empty()
-            
-            # 🔥 KRITICKÁ POISTKA PROTI CHYBE 404/STORAGE ERROR:
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                st.success("Spracovanie úspešne dokončené! Video bolo vygenerované nižšie.")
-                # Zobrazenie plynulého videa
-                main_placeholder.video(output_path)
-            else:
-                st.error("Chyba: Nepodarilo sa zapísať spracované video na disk servera. Skontrolujte formát vstupného súboru.")
-                
-        st.sidebar.markdown(explanation_text)
+            st.success("Spracovanie video streamu bolo dokončené.")
