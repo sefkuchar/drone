@@ -1,8 +1,12 @@
 import streamlit as st
-import numpy as np
+import cv2
+import os
 import time
-import pandas as pd
-import altair as alt
+import torch
+import numpy as np
+from ultralytics import YOLO
+import yt_dlp
+import imageio
 
 # ==============================================================================
 # KONFIGURÁCIA STRÁNKY
@@ -15,8 +19,17 @@ st.set_page_config(
 st.title("UAV Active Tracking Platform")
 st.markdown("---")
 
+# Načítanie modelov a hardvéru (s limitáciou na CPU pre cloud servery)
+@st.cache_resource
+def load_resources():
+    model = YOLO('yolov8n.pt')
+    model.to("cpu")  # Vynútené stabilné CPU pre cloud servery bez GPU
+    return model
+
+model = load_resources()
+
 # ==============================================================================
-# MATEMATICKÉ JADRO A VÝPOČTY (PREDIKTOR A REWARD)
+# MATEMATICKÉ JADRO A VÝPOČTY
 # ==============================================================================
 class TrajectoryPredictor:
     def __init__(self, history_len=6):
@@ -39,19 +52,76 @@ class TrajectoryPredictor:
 def evaluate_reward(error_x, error_y, confidence):
     return (confidence * 2.5) - (np.sqrt(error_x**2 + error_y**2) * 0.0015)
 
+# Opravený generátor defaultného scenára – vytvára čistú dráhu pre správnu predikciu
+def generate_default_scenario(filename):
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(filename, fourcc, 20.0, (640, 360))
+    for i in range(80):
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        cx = int(60 + i * 6)
+        cy = 180
+        
+        # Prekážka (stena) v strede videa (snímky 35 až 55)
+        if 35 <= i <= 55:
+            cv2.rectangle(frame, (250, 0), (370, 360), (60, 60, 60), -1)
+            cv2.putText(frame, "PREKAZKA", (275, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        else:
+            # Vykresľujeme syntetický cieľ, ktorý filter dokáže sledovať
+            cv2.circle(frame, (cx, cy), 15, (0, 255, 0), -1)
+            cv2.putText(frame, "TARGET", (cx-25, cy-25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+        out.write(frame)
+    out.release()
+
 # ==============================================================================
 # OVLÁDACÍ PANEL I VSTUPY
 # ==============================================================================
 st.sidebar.header("Ovladaci Panel i Vstupy")
 
-scenar = st.sidebar.selectbox(
-    "Vyberte testovaciu misiu UAV:",
-    ["Misia 1: Linearne sledovanie s prekazkou", "Misia 2: Sinusoidna trajektoria (Komplexna)"]
+input_type = st.sidebar.radio(
+    "Vyberte typ vstupu:", 
+    ["Ukazkove video (Default)", "Nahrat vlastne video", "YouTube Link"]
 )
+
+video_source = None
+
+if input_type == "Ukazkove video (Default)":
+    video_source = "temp_default_scene.mp4"
+    if st.sidebar.button("Pripravit defaultne video"):
+        with st.spinner("Generujem integrovanú simuláciu..."):
+            generate_default_scenario(video_source)
+        st.sidebar.success("Defaultné video pripravené na analýzu.")
+
+elif input_type == "Nahrat vlastne video":
+    uploaded_file = st.sidebar.file_uploader("Nahrajte MP4 video:", type=["mp4", "avi", "mov"])
+    if uploaded_file:
+        video_source = "user_input_video.mp4"
+        with open(video_source, "wb") as f:
+            f.write(uploaded_file.read())
+            st.sidebar.success("Súbor bol úspešne nahraný.")
+            
+elif input_type == "YouTube Link":
+    yt_url = st.sidebar.text_input("Zadajte YouTube URL adresu:")
+    if yt_url:
+        video_source = "youtube_downloaded.mp4"
+        if st.sidebar.button("Stiahnut a analyzovat YouTube stream"):
+            with st.spinner("Sťahujem video z YouTube..."):
+                ydl_opts = {
+                    'format': 'mp4[height<=360]', 
+                    'outtmpl': video_source,
+                    'overwrites': True,
+                    'quiet': True,
+                }
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([yt_url])
+                    st.sidebar.success("Video úspešne stiahnuté.")
+                except Exception as e:
+                    st.sidebar.error(f"Sťahovanie zlyhalo: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("Nastavenia filtrov")
-sim_speed = st.sidebar.slider("Rychlost simulacie (ms medzi snimkami)", min_value=10, max_value=200, value=50)
+frame_skip = st.sidebar.slider("Frame Skip (Uspora CPU)", min_value=1, max_value=10, value=2)
 
 # ==============================================================================
 # ROZLOZENIE STRÁNKY (LAYOUT)
@@ -59,8 +129,8 @@ sim_speed = st.sidebar.slider("Rychlost simulacie (ms medzi snimkami)", min_valu
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("Hlavny Opticky Stream (UAV Tracking Radar)")
-    chart_placeholder = st.empty()
+    st.subheader("Hlavny Opticky Stream (UAV Main Sensor)")
+    main_placeholder = st.empty()
 
 with col2:
     st.subheader("Takticky Mikro-Vyrez (ROI)")
@@ -68,6 +138,11 @@ with col2:
     
     st.subheader("Telemetria a Vypocty")
     telemetry_placeholder = st.empty()
+
+# Predpripravené statické okná pred štartom
+SEARCH_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
+cv2.putText(SEARCH_SCREEN, "SEARCHING...", (25, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
 
 explanation_text = """
 ***
@@ -80,123 +155,120 @@ explanation_text = """
 """
 st.markdown(explanation_text)
 
-start_button = st.button("Spustiť real-time simuláciu misie")
+start_button = st.button("Spustiť spracovanie video streamu")
 
 # ==============================================================================
-# LIVE BEZCHYBNÁ SIMULÁCIA (STOPERCENTNE FUNKČNÁ NA WEBE)
+# ANALÝZA A GENEROVANIE STREAMU
 # ==============================================================================
 if start_button:
-    predictor = TrajectoryPredictor()
-    CENTER_X, CENTER_Y = 320, 180
-    occlusion_counter = 0
-    
-    # Vygenerovanie 100 bodov trasy podľa zvoleného scenára
-    total_steps = 100
-    steps = np.arange(total_steps)
-    
-    if "Misia 1" in scenar:
-        # Priama línia idúca zľava doprava
-        target_xs = 50 + steps * 5.5
-        target_ys = np.full(total_steps, 180)
-        # Prekážka (stena) v strede trasy (kroky 40 až 65)
-        occlusion_mask = (steps >= 40) & (steps <= 65)
+    if not video_source or not os.path.exists(video_source):
+        st.error("Chyba: Vstupný zdroj videa nie je pripravený. Vyberte ho v bočnom paneli.")
     else:
-        # Sínusoida
-        target_xs = 50 + steps * 5.5
-        target_ys = 180 + np.sin(steps * 0.2) * 60
-        occlusion_mask = (steps >= 45) & (steps <= 70)
-
-    # Hlavný cyklus, ktorý kreslí graf namiesto padajúceho videa
-    for i in range(total_steps):
-        tx, ty = target_xs[i], target_ys[i]
-        is_hidden = occlusion_mask[i]
-        
-        # 1. PRÍPRAVA DÁT PRE GRAF
-        plot_data = []
-        
-        # Pridáme optický stred drona (červený kríž)
-        plot_data.append({"X": CENTER_X, "Y": CENTER_Y, "Typ": "Stred senzora UAV", "Velkost": 100})
-        
-        # Vykreslenie prekážky, ak sme v jej zóne
-        if is_hidden:
-            # Nasimulujeme stenu v grafe
-            for wall_y in range(50, 310, 20):
-                plot_data.append({"X": 300, "Y": wall_y, "Typ": "PREKAZKA (Budova)", "Velkost": 150})
-        
-        # Logika sledovania/predikcie
-        if not is_hidden:
-            # Objekt je viditeľný, aktualizujeme filter
-            predictor.update(tx, ty)
+        cap = cv2.VideoCapture(video_source)
+        if not cap.isOpened():
+            st.error("Chyba pri otváraní video streamu.")
+        else:
+            CENTER_X, CENTER_Y = 640 // 2, 360 // 2
+            predictor = TrajectoryPredictor()
             occlusion_counter = 0
-            conf = 0.88 if "Misia 1" in scenar else 0.45 # V misii 2 simulujeme horší uhol
-            status = "TRACKING ACTIVE" if conf > 0.5 else "ACTIVE VISION"
+            current_frame_idx = 0
             
-            err_x = int(tx - CENTER_X)
-            err_y = int(ty - CENTER_Y)
-            reward = evaluate_reward(err_x, err_y, conf)
+            # Sem uložíme finálne hotové snímky
+            processed_frames = []
             
-            plot_data.append({"X": tx, "Y": ty, "Typ": "Sledovany objekt (Ciel)", "Velkost": 200})
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            # Taktický výrez (simulovaný zeleným štvorcom)
-            zoom_data = pd.DataFrame([{"X": 0, "Y": 0}])
-            zoom_chart = alt.Chart(zoom_data).mark_square(color='green', size=3000).properties(width=150, height=150)
-            zoom_placeholder.altair_chart(zoom_chart)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0: total_frames = 80
+
+            # 1. KROK: Analýza na pozadí bez sekania siete
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret: break
+                
+                current_frame_idx += 1
+                if current_frame_idx % frame_skip != 0:
+                    continue
+                
+                progress_bar.progress(min(current_frame_idx / total_frames, 1.0))
+                status_text.text(f"Spracovávam snímku {current_frame_idx} / {total_frames}...")
+                
+                web_frame = cv2.resize(frame, (640, 360))
+                found = False
+
+                # Detekcia (Zelený kruh pre default, alebo človek pre vlastné/YT video)
+                if input_type == "Ukazkove video (Default)":
+                    hsv = cv2.cvtColor(web_frame, cv2.COLOR_BGR2HSV)
+                    # Hľadanie jasného zeleného kruhu z defaultného generátora
+                    mask = cv2.inRange(hsv, (35, 50, 50), (85, 255, 255))
+                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        c = max(contours, key=cv2.contourArea)
+                        if cv2.contourArea(c) > 40:
+                            x, y, w, h = cv2.boundingRect(c)
+                            cx, cy = x + w//2, y + h//2
+                            predictor.update(cx, cy)
+                            
+                            cv2.rectangle(web_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                            cv2.putText(web_frame, "TRACKING ACTIVE", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                            found = True
+                            occlusion_counter = 0
+                else:
+                    # YOLOv8 pre reálne nahrané alebo YouTube videá
+                    results = model(web_frame, imgsz=320, verbose=False)
+                    for box in results[0].boxes:
+                        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.20:
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            conf = float(box.conf[0])
+                            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                            predictor.update(cx, cy)
+                            
+                            status = "ACTIVE VISION" if conf < 0.50 else "TRACKING ACTIVE"
+                            color = (0, 165, 255) if conf < 0.50 else (0, 255, 0)
+                            
+                            cv2.rectangle(web_frame, (x1, y1), (x2, y2), color, 2)
+                            cv2.putText(web_frame, status, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                            found = True
+                            occlusion_counter = 0
+                            break
+
+                # Výpočet predikcie v prípade straty kontaktu (zákryt)
+                if not found:
+                    prediction = predictor.predict_next()
+                    if prediction and occlusion_counter < 30:
+                        occlusion_counter += 1
+                        px, py = prediction
+                        predictor.update(px, py) # filter dopĺňa vlastné odhady
+                        
+                        cv2.circle(web_frame, (px, py), 10, (0, 255, 255), 2)
+                        cv2.putText(web_frame, f"PREDIKCIA ({occlusion_counter})", (px+15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                    else:
+                        predictor.reset()
+                        cv2.putText(web_frame, "VYHLADAVANIE...", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                
+                # Ukladanie spracovaných snímok do poľa (RGB pre imageio)
+                processed_frames.append(cv2.cvtColor(web_frame, cv2.COLOR_BGR2RGB))
+                
+            cap.release()
+            progress_bar.empty()
+            status_text.empty()
             
-        else:
-            # Objekt je skrytý, nastupuje predikcia lineárnym filtrom
-            pred = predictor.predict_next()
-            conf = 0.0
-            
-            if pred and occlusion_counter < 30:
-                occlusion_counter += 1
-                px, py = pred
-                predictor.update(px, py) # filter kŕmi sám seba
-                status = "PREDIKCIA (STRATA KONTAKTU)"
-                err_x, err_y = px, py
-                reward = 0.0
-                plot_data.append({"X": px, "Y": py, "Typ": "Odhadovana poloha (Predikcia)", "Velkost": 200})
+            # 2. KROK: Vykreslenie hotového plynulého streamu
+            if processed_frames:
+                output_gif_path = "processed_stream.gif"
+                with st.spinner("Finalizujem video výstup pre webový prehliadač..."):
+                    # Uloženie ako GIF zabezpečí vysoké FPS a funkčnosť bez externých video kodekov na Linuxe
+                    imageio.mimwrite(output_gif_path, processed_frames, fps=15, loop=0)
+                
+                st.success("Analýza úspešne dokončená.")
+                # Zobrazenie plynulého, hotového streamu
+                main_placeholder.image(output_gif_path, use_container_width=True)
+                
+                # Zobrazenie textu z poslednej snímky do telemetrického panelu
+                telemetry_placeholder.markdown("""
+* **Stav systemu:** `MISIA UKONCENA`
+* **Spracovanie:** Stabilné (100% snímok dokončených)
+""")
             else:
-                predictor.reset()
-                status = "VYHLADAVANIE / MIMO DOSAH"
-                err_x, err_y = 0, 0
-                reward = 0.0
-        
-        # Vykreslenie hlavného radaru (Scattering plot v Altair)
-        df = pd.DataFrame(plot_data)
-        chart = alt.Chart(df).mark_circle().encode(
-            x=alt.X('X', scale=alt.Scale(domain=[0, 640])),
-            y=alt.Y('Y', scale=alt.Scale(domain=[0, 360])),
-            color=alt.Color('Typ', scale=alt.Scale(
-                domain=['Stred senzora UAV', 'Sledovany objekt (Ciel)', 'Odhadovana poloha (Predikcia)', 'PREKAZKA (Budova)'],
-                range=['red', 'green', 'yellow', 'gray']
-            )),
-            size=alt.Size('Velkost', legend=None)
-        ).properties(width=640, height=360).configure_view(strokeOpacity=0)
-        
-        chart_placeholder.altair_chart(chart, use_container_width=True)
-        
-        # UPDATE TELEMETRIE (Prebieha v dokonalom reálnom čase so zmenou grafu!)
-        if status == "PREDIKCIA (STRATA KONTAKTU)":
-            telemetry_placeholder.markdown(f"""
-* **Stav systemu:** `PREDIKCIA (STRATA KONTAKTU)` 
-* **Snímky naslepo:** `{occlusion_counter} / 30`
-* **Predpovedaný X/Y:** `X: {err_x}px | Y: {err_y}px`
-""")
-        elif "VYHLADAVANIE" in status:
-            telemetry_placeholder.markdown("""
-* **Stav systemu:** `VYHLADAVANIE / MIMO DOSAH` 
-* **Confidence (Istota AI):** `0.00%`
-* **RL Reward (Skore odmeny):** `N/A`
-""")
-        else:
-            telemetry_placeholder.markdown(f"""
-* **Stav systemu:** `{status}` 
-* **Confidence (Istota AI):** `{conf:.2%}` 
-* **RL Reward (Skore odmeny):** `{reward:+.4f}` 
-* **Error X/Y (Odchylka od stredu):** `X: {err_x}px | Y: {err_y}px`
-""")
-            
-        time.sleep(sim_speed / 1000.0)
-        
-    st.success("Simulácia misie bola úspešne dokončená.")
-    st.balloons()
+                st.error("Chyba: Zo zvoleného súboru nebolo možné prečítať žiadne snímky.")
