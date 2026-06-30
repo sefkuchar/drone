@@ -6,7 +6,6 @@ import torch
 import numpy as np
 from ultralytics import YOLO
 import yt_dlp
-import imageio
 
 # ==============================================================================
 # KONFIGURÁCIA STRÁNKY
@@ -52,21 +51,21 @@ class TrajectoryPredictor:
 def evaluate_reward(error_x, error_y, confidence):
     return (confidence * 2.5) - (np.sqrt(error_x**2 + error_y**2) * 0.0015)
 
-# Opravený generátor defaultného scenára – vytvára čistú dráhu pre správnu predikciu
+# Generátor defaultného scenára pre bezchybnú simuláciu
 def generate_default_scenario(filename):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(filename, fourcc, 20.0, (640, 360))
-    for i in range(80):
+    for i in range(100):
         frame = np.zeros((360, 640, 3), dtype=np.uint8)
-        cx = int(60 + i * 6)
+        cx = int(60 + i * 5.2)
         cy = 180
         
-        # Prekážka (stena) v strede videa (snímky 35 až 55)
-        if 35 <= i <= 55:
+        # Prekážka v strede videa (snímky 40 až 65)
+        if 40 <= i <= 65:
             cv2.rectangle(frame, (250, 0), (370, 360), (60, 60, 60), -1)
             cv2.putText(frame, "PREKAZKA", (275, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         else:
-            # Vykresľujeme syntetický cieľ, ktorý filter dokáže sledovať
+            # Zelený kruh ako simulovaný chodec/cieľ
             cv2.circle(frame, (cx, cy), 15, (0, 255, 0), -1)
             cv2.putText(frame, "TARGET", (cx-25, cy-25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
@@ -90,7 +89,7 @@ if input_type == "Ukazkove video (Default)":
     if st.sidebar.button("Pripravit defaultne video"):
         with st.spinner("Generujem integrovanú simuláciu..."):
             generate_default_scenario(video_source)
-        st.sidebar.success("Defaultné video pripravené na analýzu.")
+        st.sidebar.success("Defaultné video pripravené.")
 
 elif input_type == "Nahrat vlastne video":
     uploaded_file = st.sidebar.file_uploader("Nahrajte MP4 video:", type=["mp4", "avi", "mov"])
@@ -121,7 +120,8 @@ elif input_type == "YouTube Link":
 
 st.sidebar.markdown("---")
 st.sidebar.header("Nastavenia filtrov")
-frame_skip = st.sidebar.slider("Frame Skip (Uspora CPU)", min_value=1, max_value=10, value=2)
+# Odporúčané nastavenie pre cloud je 4-6 na zabezpečenie dostatočného FPS
+frame_skip = st.sidebar.slider("Frame Skip (Uspora CPU)", min_value=1, max_value=10, value=4)
 
 # ==============================================================================
 # ROZLOZENIE STRÁNKY (LAYOUT)
@@ -155,14 +155,14 @@ explanation_text = """
 """
 st.markdown(explanation_text)
 
-start_button = st.button("Spustiť spracovanie video streamu")
+start_button = st.button("Spustiť aktívne sledovanie")
 
 # ==============================================================================
-# ANALÝZA A GENEROVANIE STREAMU
+# ŽIVÝ CYKLUS - SYNCHRONIZOVANÉ VYKRESLENIE VŠETKÝCH PANELOV
 # ==============================================================================
 if start_button:
     if not video_source or not os.path.exists(video_source):
-        st.error("Chyba: Vstupný zdroj videa nie je pripravený. Vyberte ho v bočnom paneli.")
+        st.error("Chyba: Zdroj videa nie je pripravený. Inicializujte ho v bočnom paneli!")
     else:
         cap = cv2.VideoCapture(video_source)
         if not cap.isOpened():
@@ -173,34 +173,24 @@ if start_button:
             occlusion_counter = 0
             current_frame_idx = 0
             
-            # Sem uložíme finálne hotové snímky
-            processed_frames = []
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0: total_frames = 80
+            PRED_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
+            cv2.putText(PRED_SCREEN, "PREDICTING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-            # 1. KROK: Analýza na pozadí bez sekania siete
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
                 
                 current_frame_idx += 1
+                # Kľúčový filter, ktorý zachraňuje cloud pred sekaním
                 if current_frame_idx % frame_skip != 0:
                     continue
-                
-                progress_bar.progress(min(current_frame_idx / total_frames, 1.0))
-                status_text.text(f"Spracovávam snímku {current_frame_idx} / {total_frames}...")
                 
                 web_frame = cv2.resize(frame, (640, 360))
                 found = False
 
-                # Detekcia (Zelený kruh pre default, alebo človek pre vlastné/YT video)
+                # 1. DETEKCIA CIEĽA
                 if input_type == "Ukazkove video (Default)":
                     hsv = cv2.cvtColor(web_frame, cv2.COLOR_BGR2HSV)
-                    # Hľadanie jasného zeleného kruhu z defaultného generátora
                     mask = cv2.inRange(hsv, (35, 50, 50), (85, 255, 255))
                     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if contours:
@@ -210,12 +200,28 @@ if start_button:
                             cx, cy = x + w//2, y + h//2
                             predictor.update(cx, cy)
                             
+                            err_x, err_y = cx - CENTER_X, cy - CENTER_Y
+                            reward = evaluate_reward(err_x, err_y, 0.95)
+                            
                             cv2.rectangle(web_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                             cv2.putText(web_frame, "TRACKING ACTIVE", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                            
+                            # LIVE AKTUALIZÁCIA TAKTICKÉHO VÝREZU (ROI)
+                            crop = web_frame[max(0, y-15):min(360, y+h+15), max(0, x-15):min(640, x+w+15)]
+                            if crop.size > 0:
+                                zoom_placeholder.image(cv2.resize(crop, (150, 150)), channels="BGR")
+                                
+                            # LIVE AKTUALIZÁCIA TELEMETRIE
+                            telemetry_placeholder.markdown(f"""
+* **Stav systemu:** `TRACKING ACTIVE` 
+* **Confidence (Istota AI):** `95.00%` 
+* **RL Reward (Skore odmeny):** `{reward:+.4f}` 
+* **Error X/Y (Odchylka od stredu):** `X: {err_x}px | Y: {err_y}px`
+""")
                             found = True
                             occlusion_counter = 0
                 else:
-                    # YOLOv8 pre reálne nahrané alebo YouTube videá
+                    # YOLOv8 pre vlastné alebo YouTube videá
                     results = model(web_frame, imgsz=320, verbose=False)
                     for box in results[0].boxes:
                         if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.20:
@@ -224,51 +230,63 @@ if start_button:
                             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                             predictor.update(cx, cy)
                             
+                            err_x, err_y = cx - CENTER_X, cy - CENTER_Y
+                            reward = evaluate_reward(err_x, err_y, conf)
+                            
                             status = "ACTIVE VISION" if conf < 0.50 else "TRACKING ACTIVE"
                             color = (0, 165, 255) if conf < 0.50 else (0, 255, 0)
                             
                             cv2.rectangle(web_frame, (x1, y1), (x2, y2), color, 2)
                             cv2.putText(web_frame, status, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                            
+                            # LIVE AKTUALIZÁCIA TAKTICKÉHO VÝREZU (ROI)
+                            crop = web_frame[max(0, y1-15):min(360, y2+15), max(0, x1-15):min(640, x2+15)]
+                            if crop.size > 0:
+                                zoom_placeholder.image(cv2.resize(crop, (150, 150)), channels="BGR")
+                                
+                            # LIVE AKTUALIZÁCIA TELEMETRIE
+                            telemetry_placeholder.markdown(f"""
+* **Stav systemu:** `{status}` 
+* **Confidence (Istota AI):** `{conf:.2%}` 
+* **RL Reward (Skore odmeny):** `{reward:+.4f}` 
+* **Error X/Y (Odchylka od stredu):** `X: {err_x}px | Y: {err_y}px`
+""")
                             found = True
                             occlusion_counter = 0
                             break
 
-                # Výpočet predikcie v prípade straty kontaktu (zákryt)
+                # 2. LOGIKA PREDIKCIE (STRATA KONTAKTU / ZÁKRYT)
                 if not found:
                     prediction = predictor.predict_next()
                     if prediction and occlusion_counter < 30:
                         occlusion_counter += 1
                         px, py = prediction
-                        predictor.update(px, py) # filter dopĺňa vlastné odhady
+                        predictor.update(px, py)
                         
                         cv2.circle(web_frame, (px, py), 10, (0, 255, 255), 2)
                         cv2.putText(web_frame, f"PREDIKCIA ({occlusion_counter})", (px+15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                        
+                        # Zmena panelov na stav predikcie
+                        zoom_placeholder.image(PRED_SCREEN, channels="BGR")
+                        telemetry_placeholder.markdown(f"""
+* **Stav systemu:** `PREDIKCIA (STRATA KONTAKTU)` 
+* **Snímky naslepo:** `{occlusion_counter} / 30`
+* **Predpovedaný X/Y:** `X: {px}px | Y: {py}px`
+""")
                     else:
                         predictor.reset()
-                        cv2.putText(web_frame, "VYHLADAVANIE...", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                        zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
+                        telemetry_placeholder.markdown("""
+* **Stav systemu:** `VYHLADAVANIE / MIMO DOSAH` 
+* **Confidence (Istota AI):** `0.00%`
+* **RL Reward (Skore odmeny):** `N/A`
+""")
                 
-                # Ukladanie spracovaných snímok do poľa (RGB pre imageio)
-                processed_frames.append(cv2.cvtColor(web_frame, cv2.COLOR_BGR2RGB))
+                # Vykreslenie hlavného obrazu drona naživo
+                main_placeholder.image(web_frame, channels="BGR", use_container_width=True)
+                
+                # Krátka pauza na synchronizáciu vykresľovania na webe
+                time.sleep(0.01)
                 
             cap.release()
-            progress_bar.empty()
-            status_text.empty()
-            
-            # 2. KROK: Vykreslenie hotového plynulého streamu
-            if processed_frames:
-                output_gif_path = "processed_stream.gif"
-                with st.spinner("Finalizujem video výstup pre webový prehliadač..."):
-                    # Uloženie ako GIF zabezpečí vysoké FPS a funkčnosť bez externých video kodekov na Linuxe
-                    imageio.mimwrite(output_gif_path, processed_frames, fps=15, loop=0)
-                
-                st.success("Analýza úspešne dokončená.")
-                # Zobrazenie plynulého, hotového streamu
-                main_placeholder.image(output_gif_path, use_container_width=True)
-                
-                # Zobrazenie textu z poslednej snímky do telemetrického panelu
-                telemetry_placeholder.markdown("""
-* **Stav systemu:** `MISIA UKONCENA`
-* **Spracovanie:** Stabilné (100% snímok dokončených)
-""")
-            else:
-                st.error("Chyba: Zo zvoleného súboru nebolo možné prečítať žiadne snímky.")
+            st.success("Sledovanie video streamu bolo úspešne dokončené.")
