@@ -1,4 +1,9 @@
 streamlit
+opencv-python-headless
+ultralytics
+torch
+torchvision
 numpy
-pandas
-altair
+yt-dlp
+imageio
+imageio-ffmpeg
