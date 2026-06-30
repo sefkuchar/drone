@@ -1,11 +1,11 @@
 import streamlit as st
 import cv2
 import os
+import time
 import torch
 import numpy as np
 from ultralytics import YOLO
 import yt_dlp
-import imageio
 
 # ==============================================================================
 # KONFIGURÁCIA STRÁNKY
@@ -55,7 +55,7 @@ def evaluate_reward(error_x, error_y, confidence):
 def generate_default_scenario(filename):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(filename, fourcc, 30.0, (640, 360))
-    for i in range(90):  # Skrátené na 90 snímok pre rýchlejšie spracovanie na webe
+    for i in range(90):  
         frame = np.zeros((360, 640, 3), dtype=np.uint8)
         cx = int(80 + i * 5)
         cy = 200
@@ -135,7 +135,7 @@ with col2:
     st.subheader("Telemetria a Vypocty")
     telemetry_placeholder = st.empty()
 
-# Predpripravené obrazovky pre statický vizuál pred spustením
+# Predpripravené statické okná pred štartom
 SEARCH_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
 cv2.putText(SEARCH_SCREEN, "SEARCHING...", (25, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
@@ -154,7 +154,7 @@ st.markdown(explanation_text)
 start_button = st.button("Spustiť spracovanie a vygenerovať plynulý stream")
 
 # ==============================================================================
-# BLESKOVÉ SPRACOVANIE NA POZADÍ (STOPERCENTNÁ KOMPATIBILITA PRE WEB)
+# INTELIGENTNÉ SPRACOVANIE S UKLADANÍM DO BUFFERA
 # ==============================================================================
 if start_button:
     if not video_source or not os.path.exists(video_source):
@@ -169,17 +169,18 @@ if start_button:
             occlusion_counter = 0
             current_frame_idx = 0
             
-            # Sem budeme ukladať hotové spracované snímky
-            processed_frames = []
+            # Zoznamy, kam si uložíme vygenerované dáta pred spustením prehrávača
+            frames_buffer = []
+            crops_buffer = []
+            telemetry_buffer = []
             
-            # Grafické indikátory spracovania pre používateľa
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             if total_frames <= 0: total_frames = 90
 
-            # 1. KROK: Rýchla analýza na pozadí (bez odosielania dát cez sieť počas cyklu)
+            # 1. KROK: Rýchla analýza na pozadí a naplnenie pamäte
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
@@ -188,12 +189,22 @@ if start_button:
                 if current_frame_idx % frame_skip != 0:
                     continue
                 
-                # Aktualizácia progress baru na webe
                 progress_bar.progress(min(current_frame_idx / total_frames, 1.0))
                 status_text.text(f"AI analyzuje video na serveri... Snímka {current_frame_idx} / {total_frames}")
                 
                 web_frame = cv2.resize(frame, (640, 360))
                 found = False
+                
+                # Defaultné nastavenia pre prípad, že objekt neexistuje
+                crop_img = SEARCH_SCREEN.copy()
+                tel_data = {
+                    "status": "VYHLADAVANIE / MIMO DOSAH",
+                    "conf": 0.0,
+                    "reward": None,
+                    "err_x": 0,
+                    "err_y": 0,
+                    "frames_blind": 0
+                }
 
                 # YOLOv8 Detekcia osôb
                 results = model(web_frame, imgsz=320, verbose=False)
@@ -213,9 +224,20 @@ if start_button:
                         cv2.rectangle(web_frame, (x1, y1), (x2, y2), color, 2)
                         cv2.putText(web_frame, status, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
                         
-                        # Zápis aktuálnej telemetrie priamo na obraz (aby zostala viditeľná v prehrávači)
-                        cv2.putText(web_frame, f"Status: {status} | Conf: {conf:.2%}", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-                        cv2.putText(web_frame, f"Error X: {err_x}px | Y: {err_y}px", (15, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                        # Príprava ROI výrezu do pamäte
+                        c_raw = web_frame[max(0, y1-15):min(360, y2+15), max(0, x1-15):min(640, x2+15)]
+                        if c_raw.size > 0:
+                            crop_img = cv2.resize(c_raw, (150, 150))
+                        
+                        # Príprava telemetrických dát
+                        tel_data = {
+                            "status": status,
+                            "conf": conf,
+                            "reward": reward,
+                            "err_x": err_x,
+                            "err_y": err_y,
+                            "frames_blind": 0
+                        }
                         
                         found = True
                         occlusion_counter = 0
@@ -231,28 +253,68 @@ if start_button:
                         
                         cv2.circle(web_frame, (px, py), 10, (0, 255, 255), 2)
                         cv2.putText(web_frame, f"PREDIKCIA ({occlusion_counter})", (px+15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                        cv2.putText(web_frame, f"Status: OCLUSION PREDICTION ({occlusion_counter}/30)", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                        
+                        PRED_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
+                        cv2.putText(PRED_SCREEN, "PREDICTING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                        crop_img = PRED_SCREEN
+                        
+                        tel_data = {
+                            "status": "PREDIKCIA (STRATA KONTAKTU)",
+                            "conf": 0.0,
+                            "reward": None,
+                            "err_x": px,
+                            "err_y": py,
+                            "frames_blind": occlusion_counter
+                        }
                     else:
                         predictor.reset()
-                        cv2.putText(web_frame, "Status: SEARCHING...", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-                
-                # Ukladanie upravenej snímky do poľa (v RGB formáte pre imageio)
-                rgb_frame = cv2.cvtColor(web_frame, cv2.COLOR_BGR2RGB)
-                processed_frames.append(rgb_frame)
+
+                # Uloženie všetkého do bufferov (preklápame BGR na RGB pre Streamlit)
+                frames_buffer.append(cv2.cvtColor(web_frame, cv2.COLOR_BGR2RGB))
+                crops_buffer.append(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
+                telemetry_buffer.append(tel_data)
                 
             cap.release()
             progress_bar.empty()
             status_text.empty()
             
-            # 2. KROK: Uloženie videa pomocou IMAGEIO s garantovaným H.264 webovým kodekom
-            if processed_frames:
-                output_web_path = "final_web_stream.mp4"
-                with st.spinner("Generujem výsledný video stream pre web prehliadač..."):
-                    imageio.mimwrite(output_web_path, processed_frames, fps=15, macro_block_size=None)
+            # 2. KROK: ULTRA-PLYnulé PREHRÁVANIE ZO ZDIEĽANEJ PAMÄTE Servera
+            if frames_buffer:
+                st.success("Analýza dokončená! Spúšťam synchronizovaný taktický stream.")
                 
-                st.success("Analýza úspešne dokončená! Nižšie je tvoj plynulý stream v 30 FPS.")
-                
-                # Zobrazenie v natívnom videoprehrávači, ktorý funguje bez sekania
-                main_placeholder.video(output_web_path)
+                # Prechádzame predpripravené dáta z pamäte, čo eliminujem sieťové oneskorenie
+                for idx in range(len(frames_buffer)):
+                    # Vykreslenie hlavného obrazu
+                    main_placeholder.image(frames_buffer[idx], use_container_width=True)
+                    
+                    # Vykreslenie výrezu (ROI)
+                    zoom_placeholder.image(crops_buffer[idx])
+                    
+                    # Vykreslenie dynamických textových polí v pravom stĺpci
+                    t = telemetry_buffer[idx]
+                    if t["status"] == "PREDIKCIA (STRATA KONTAKTU)":
+                        telemetry_placeholder.markdown(f"""
+* **Stav systemu:** `PREDIKCIA (STRATA KONTAKTU)` 
+* **Snímky naslepo:** `{t['frames_blind']} / 30`
+* **Predpovedaný X/Y:** `X: {t['err_x']}px | Y: {t['err_y']}px`
+""")
+                    elif "VYHLADAVANIE" in t["status"]:
+                        telemetry_placeholder.markdown("""
+* **Stav systemu:** `VYHLADAVANIE / MIMO DOSAH` 
+* **Confidence (Istota AI):** `0.00%`
+* **RL Reward (Skore odmeny):** `N/A`
+""")
+                    else:
+                        telemetry_placeholder.markdown(f"""
+* **Stav systemu:** `{t['status']}` 
+* **Confidence (Istota AI):** `{t['conf']:.2%}` 
+* **RL Reward (Skore odmeny):** `{t['reward']:+.4f}` 
+* **Error X/Y (Odchylka od stredu):** `X: {t['err_x']}px | Y: {t['err_y']}px`
+""")
+                    
+                    # Riadenie rýchlosti vykresľovania na webe (cca 25-30 FPS)
+                    time.sleep(0.035)
+                    
+                st.balloons()
             else:
-                st.error("Chyba: Zo vstupného videa sa nepodarilo vyčítať žiadne snímky.")
+                st.error("Chyba: Nepodarilo sa získať žiadne dáta z videa.")
