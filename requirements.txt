@@ -8,3 +8,4 @@ numpy
 yt-dlp
 imageio
 imageio-ffmpeg
+av
