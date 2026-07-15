@@ -40,7 +40,6 @@ class TrajectoryPredictor:
 
     def predict_next(self):
         if len(self.history) < 2: return None
-        # Výpočet strednej rýchlosti zmeny (diferencie) súradníc medzi snímkami
         deltas_x = [self.history[i][0] - self.history[i-1][0] for i in range(1, len(self.history))]
         deltas_y = [self.history[i][1] - self.history[i-1][1] for i in range(1, len(self.history))]
         return int(self.history[-1][0] + sum(deltas_x)/len(deltas_x)), int(self.history[-1][1] + sum(deltas_y)/len(deltas_y))
@@ -52,17 +51,29 @@ def evaluate_reward(error_x, error_y, confidence):
     # R = R_conf - P_dist (Maximalizácia istoty detekcie s penalizáciou za pixelovú odchýlku od stredu)
     return (confidence * 2.5) - (np.sqrt(error_x**2 + error_y**2) * 0.0015)
 
-# Automatické stiahnutie reálneho benchmarkového videa od Intelu
-def download_real_benchmark_video(filename):
-    if not os.path.exists(filename):
-        # Repozitár Intel IoT DevKit Sample Videos (obsahuje reálnych idúcich ľudí)
-        url = "https://github.com/intel-iot-devkit/sample-videos/raw/master/people-detection.mp4"
-        with st.spinner("Sťahujem reálne benchmarkové video od Intelu..."):
-            urllib.request.urlretrieve(url, filename)
-        st.success("Reálne testovacie video bolo úspešne inicializované.")
-
+# 1. KROK: Absolútne spoľahlivá inicializácia reálneho videa
 video_source = "intel_people_detection.mp4"
-download_real_benchmark_video(video_source)
+
+# Sťahovanie videa s jasnou vizuálnou informáciou pre používateľa
+if not os.path.exists(video_source):
+    st.info("Inicializujem reálne testovacie video z internetu (Intel Benchmark). Prosím, počkajte chvíľu...")
+    try:
+        # Oficiálne testovacie video od Intelu pre detekciu osôb
+        url = "https://raw.githubusercontent.com/intel-iot-devkit/sample-videos/master/people-detection.mp4"
+        urllib.request.urlretrieve(url, video_source)
+        st.success("Reálne video úspešne stiahnuté a pripravené na analýzu!")
+        st.rerun() # Reštart pre načítanie súboru
+    except Exception as e:
+        st.error(f"Nepodarilo sa stiahnuť video z primárneho zdroja: {e}")
+        st.info("Pokúšam sa o alternatívny zdroj...")
+        # Záložný link v prípade výpadku primárneho GitHubu
+        backup_url = "https://github.com/intel-iot-devkit/sample-videos/raw/master/people-detection.mp4"
+        try:
+            urllib.request.urlretrieve(backup_url, video_source)
+            st.success("Záložné video úspešne stiahnuté!")
+            st.rerun()
+        except Exception as err:
+            st.error(f"Chyba siete: {err}. Spustite aplikáciu znova.")
 
 # ==============================================================================
 # ROZLOZENIE STRÁNKY (LAYOUT)
@@ -72,6 +83,14 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.subheader("Hlavny Opticky Stream (UAV Main Sensor)")
     main_placeholder = st.empty()
+    
+    # Ak sa ešte nezačalo spracovanie, ukážeme statický úvodný náhľad
+    if os.path.exists(video_source):
+        cap_preview = cv2.VideoCapture(video_source)
+        ret, frame_preview = cap_preview.read()
+        if ret:
+            main_placeholder.image(cv2.resize(frame_preview, (640, 360)), channels="BGR", use_container_width=True)
+        cap_preview.release()
 
 with col2:
     st.subheader("Takticky Mikro-Vyrez (ROI)")
@@ -149,7 +168,7 @@ if start_button:
                     occlusion_counter = 0
                     break  # Sledujeme prioritne prvého nájdeného človeka
 
-            # Logika prediktívneho filtra pri oklúzii (prekážke)
+            # Logika prediktívneho filtra pri oklúzii (prekážke / strate vizuálneho kontaktu)
             if not found:
                 prediction = predictor.predict_next()
                 if prediction and occlusion_counter < 30:
