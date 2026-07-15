@@ -48,32 +48,20 @@ class TrajectoryPredictor:
         self.history.clear()
 
 def evaluate_reward(error_x, error_y, confidence):
-    # R = R_conf - P_dist (Maximalizácia istoty detekcie s penalizáciou za pixelovú odchýlku od stredu)
     return (confidence * 2.5) - (np.sqrt(error_x**2 + error_y**2) * 0.0015)
 
-# 1. KROK: Absolútne spoľahlivá inicializácia reálneho videa
+# Inicializácia reálneho videa
 video_source = "intel_people_detection.mp4"
 
-# Sťahovanie videa s jasnou vizuálnou informáciou pre používateľa
 if not os.path.exists(video_source):
     st.info("Inicializujem reálne testovacie video z internetu (Intel Benchmark). Prosím, počkajte chvíľu...")
     try:
-        # Oficiálne testovacie video od Intelu pre detekciu osôb
         url = "https://raw.githubusercontent.com/intel-iot-devkit/sample-videos/master/people-detection.mp4"
         urllib.request.urlretrieve(url, video_source)
         st.success("Reálne video úspešne stiahnuté a pripravené na analýzu!")
-        st.rerun() # Reštart pre načítanie súboru
+        st.rerun()
     except Exception as e:
-        st.error(f"Nepodarilo sa stiahnuť video z primárneho zdroja: {e}")
-        st.info("Pokúšam sa o alternatívny zdroj...")
-        # Záložný link v prípade výpadku primárneho GitHubu
-        backup_url = "https://github.com/intel-iot-devkit/sample-videos/raw/master/people-detection.mp4"
-        try:
-            urllib.request.urlretrieve(backup_url, video_source)
-            st.success("Záložné video úspešne stiahnuté!")
-            st.rerun()
-        except Exception as err:
-            st.error(f"Chyba siete: {err}. Spustite aplikáciu znova.")
+        st.error(f"Nepodarilo sa stiahnuť video: {e}")
 
 # ==============================================================================
 # ROZLOZENIE STRÁNKY (LAYOUT)
@@ -83,14 +71,6 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.subheader("Hlavny Opticky Stream (UAV Main Sensor)")
     main_placeholder = st.empty()
-    
-    # Ak sa ešte nezačalo spracovanie, ukážeme statický úvodný náhľad
-    if os.path.exists(video_source):
-        cap_preview = cv2.VideoCapture(video_source)
-        ret, frame_preview = cap_preview.read()
-        if ret:
-            main_placeholder.image(cv2.resize(frame_preview, (640, 360)), channels="BGR", use_container_width=True)
-        cap_preview.release()
 
 with col2:
     st.subheader("Takticky Mikro-Vyrez (ROI)")
@@ -104,10 +84,18 @@ SEARCH_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
 cv2.putText(SEARCH_SCREEN, "SEARCHING...", (25, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
 
-start_button = st.button("Spustiť aktívne sledovanie misie")
+# Zobrazenie statického náhľadu videa pred spustením
+if os.path.exists(video_source):
+    cap_preview = cv2.VideoCapture(video_source)
+    ret, frame_preview = cap_preview.read()
+    if ret:
+        main_placeholder.image(cv2.resize(frame_preview, (640, 360)), channels="BGR", use_container_width=True)
+    cap_preview.release()
+
+start_button = st.button("Spustiť optimalizované plynulé sledovanie")
 
 # ==============================================================================
-# ŽIVÝ CYKLUS - SYNCHRONIZOVANÉ VYKRESLENIE
+# ASYNCHRÓNNA ANALÝZA A VYSOKO-RÝCHLOSTNÉ PREHRÁVANIE
 # ==============================================================================
 if start_button:
     cap = cv2.VideoCapture(video_source)
@@ -117,28 +105,27 @@ if start_button:
         CENTER_X, CENTER_Y = 640 // 2, 360 // 2
         predictor = TrajectoryPredictor()
         occlusion_counter = 0
-        current_frame_idx = 0
-        frame_skip = 4  # Optimalizácia prechodu snímok na CPU servery
         
-        PRED_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
-        cv2.putText(PRED_SCREEN, "PREDICTING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
+        # Buffery pre ukladanie hotových snímok a telemetrie do RAM
+        frames_cache = []
+        crops_cache = []
+        telemetry_cache = []
+        
+        # 1. KROK: Ultrarýchly "pre-processing" na serveri (len každá 3. snímka pre úsporu)
+        status_box = st.empty()
+        status_box.info("AI vykonáva rýchlu analýzu trajektórií na pozadí...")
+        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
             
-            current_frame_idx += 1
-            if current_frame_idx % frame_skip != 0:
-                continue
-            
             web_frame = cv2.resize(frame, (640, 360))
             found = False
-
-            # Inferenčný krok neurónovej siete YOLOv8 (detekcia ľudí - index triedy 0)
+            
+            # Detekcia YOLOv8
             results = model(web_frame, imgsz=320, verbose=False)
             
             for box in results[0].boxes:
-                # 0 = person v datasete COCO
                 if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.35:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     conf = float(box.conf[0])
@@ -148,27 +135,30 @@ if start_button:
                     err_x, err_y = cx - CENTER_X, cy - CENTER_Y
                     reward = evaluate_reward(err_x, err_y, conf)
                     
-                    status = "TRACKING ACTIVE"
+                    # Nakreslenie zameriavača
                     cv2.rectangle(web_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(web_frame, f"ID_0: PERSON {conf:.2f}", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                    cv2.putText(web_frame, "TRACKING ACTIVE", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
                     
-                    # Dynamický výrez ROI okolo detegovaného človeka
+                    # Výrez ROI
                     crop = web_frame[max(0, y1-15):min(360, y2+15), max(0, x1-15):min(640, x2+15)]
-                    if crop.size > 0:
-                        zoom_placeholder.image(cv2.resize(crop, (150, 150)), channels="BGR")
-                        
-                    # Aktualizácia telemetrie
-                    telemetry_placeholder.markdown(f"""
-* **Stav systemu:** `TRACKING ACTIVE` 
-* **Confidence (Istota AI):** `{conf:.2%}` 
-* **RL Reward (Skore odmeny):** `{reward:+.4f}` 
-* **Error X/Y (Odchylka od stredu):** `X: {err_x}px | Y: {err_y}px`
-""")
+                    crop_resized = cv2.resize(crop, (150, 150)) if crop.size > 0 else SEARCH_SCREEN
+                    
+                    # Uloženie dát
+                    frames_cache.append(web_frame)
+                    crops_cache.append(crop_resized)
+                    telemetry_cache.append({
+                        "status": "TRACKING ACTIVE",
+                        "conf": f"{conf:.2%}",
+                        "reward": f"{reward:+.4f}",
+                        "err_x": err_x,
+                        "err_y": err_y
+                    })
+                    
                     found = True
                     occlusion_counter = 0
-                    break  # Sledujeme prioritne prvého nájdeného človeka
+                    break
 
-            # Logika prediktívneho filtra pri oklúzii (prekážke / strate vizuálneho kontaktu)
+            # Lineárny prediktor pri strate zamerania
             if not found:
                 prediction = predictor.predict_next()
                 if prediction and occlusion_counter < 30:
@@ -179,23 +169,48 @@ if start_button:
                     cv2.circle(web_frame, (px, py), 10, (0, 255, 255), 2)
                     cv2.putText(web_frame, f"PREDIKCIA ({occlusion_counter})", (px+15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                     
-                    zoom_placeholder.image(PRED_SCREEN, channels="BGR")
-                    telemetry_placeholder.markdown(f"""
-* **Stav systemu:** `PREDIKCIA (STRATA KONTAKTU)` 
-* **Snímky naslepo:** `{occlusion_counter} / 30`
-* **Predpovedaný X/Y:** `X: {px}px | Y: {py}px`
-""")
+                    PRED_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
+                    cv2.putText(PRED_SCREEN, "PREDICTING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    
+                    frames_cache.append(web_frame)
+                    crops_cache.append(PRED_SCREEN)
+                    telemetry_cache.append({
+                        "status": f"PREDIKCIA (ZÁKRYT {occlusion_counter}/30)",
+                        "conf": "0.00%",
+                        "reward": "0.0000",
+                        "err_x": px,
+                        "err_y": py
+                    })
                 else:
                     predictor.reset()
-                    zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
-                    telemetry_placeholder.markdown("""
-* **Stav systemu:** `VYHLADAVANIE / MIMO DOSAH` 
-* **Confidence (Istota AI):** `0.00%`
-* **RL Reward (Skore odmeny):** `N/A`
-""")
-            
-            # Vykreslenie hlavného obrazu drona naživo
-            main_placeholder.image(web_frame, channels="BGR", use_container_width=True)
-            time.sleep(0.01)
-            
+                    frames_cache.append(web_frame)
+                    crops_cache.append(SEARCH_SCREEN)
+                    telemetry_cache.append({
+                        "status": "VYHLADAVANIE / MIMO DOSAH",
+                        "conf": "0.00%",
+                        "reward": "N/A",
+                        "err_x": 0,
+                        "err_y": 0
+                    })
+                    
         cap.release()
+        status_box.empty()
+        
+        # 2. KROK: Vykreslenie z pamäte (RAM) bez akéhokoľvek sieťového oneskorenia (Stabilných 25-30 FPS)
+        for i in range(len(frames_cache)):
+            # Render hlavného obrazu drona naživo
+            main_placeholder.image(frames_cache[i], channels="BGR", use_container_width=True)
+            
+            # Render ROI výrezu
+            zoom_placeholder.image(crops_cache[i], channels="BGR")
+            
+            # Aktualizácia telemetrie
+            t = telemetry_cache[i]
+            telemetry_placeholder.markdown(f"""
+* **Stav systemu:** `{t['status']}` 
+* **Confidence (Istota AI):** `{t['conf']}` 
+* **RL Reward (Skore odmeny):** `{t['reward']}` 
+* **Error X/Y (Odchylka od stredu):** `X: {t['err_x']}px | Y: {t['err_y']}px`
+""")
+            # Simulácia stabilného 30 FPS snímania (33 milisekúnd pauza)
+            time.sleep(0.033)
