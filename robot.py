@@ -17,7 +17,7 @@ st.markdown("---")
 st.info("Klikni na tlačidlo **START** nižšie pre načítanie WebRTC kanála.")
 
 VIDEO_PATH = "test_video.mp4"
-VIDEO_URL = "https://raw.githubusercontent.com/intel-iot-devkit/sample-videos/master/people-detection.mp4"
+VIDEO_URL = "https://www.robots.ox.ac.uk/~vgg/data/pets/data/video.mp4"
 
 if not os.path.exists(VIDEO_PATH):
     with st.spinner("Sťahujem testovacie video..."):
