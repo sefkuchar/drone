@@ -1,6 +1,7 @@
 import streamlit as st
 import cv2
 import os
+import time
 import urllib.request
 import numpy as np
 from ultralytics import YOLO
@@ -20,7 +21,7 @@ st.markdown("---")
 @st.cache_resource
 def load_resources():
     model = YOLO('yolov8n.pt')
-    model.to("cpu")  # Stabilné CPU pre cloud servery
+    model.to("cpu")  # Vynútené stabilné CPU pre cloud servery
     return model
 
 model = load_resources()
@@ -47,19 +48,18 @@ class TrajectoryPredictor:
         self.history.clear()
 
 def evaluate_reward(error_x, error_y, confidence):
-    # R = R_conf - P_dist (Vzorec posilňovaného učenia pre UAV agenta)
+    # R = R_conf - P_dist (Maximalizácia istoty detekcie s penalizáciou za pixelovú odchýlku od stredu)
     return (confidence * 2.5) - (np.sqrt(error_x**2 + error_y**2) * 0.0015)
 
 # Inicializácia reálneho videa z internetu (Intel Benchmark)
 video_source = "intel_people_detection.mp4"
-output_video = "analyzed_output.mp4"
 
 if not os.path.exists(video_source):
     st.info("Inicializujem reálne testovacie video z internetu (Intel Benchmark). Prosím, počkajte chvíľu...")
     try:
         url = "https://raw.githubusercontent.com/intel-iot-devkit/sample-videos/master/people-detection.mp4"
         urllib.request.urlretrieve(url, video_source)
-        st.success("Reálne video úspešne stiahnuté a pripravené na analýzu!")
+        st.success("Reálne video úspešne stiahnuté a pripravené!")
         st.rerun()
     except Exception as e:
         st.error(f"Nepodarilo sa stiahnuť video: {e}")
@@ -67,84 +67,67 @@ if not os.path.exists(video_source):
 # ==============================================================================
 # ROZLOZENIE STRÁNKY (LAYOUT)
 # ==============================================================================
-col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("UAV Optický Stream & Analýza")
-    # Hlavné okno na prehrávanie finálneho stabilného videa
-    video_placeholder = st.empty()
+    st.subheader("Hlavny Opticky Stream (UAV Main Sensor)")
+    main_placeholder = st.empty()
     
-    # Úvodný statický náhľad pred spustením analýzy
-    if not os.path.exists(output_video) and os.path.exists(video_source):
+    # Úvodný statický náhľad videa pred spustením
+    if os.path.exists(video_source):
         cap_preview = cv2.VideoCapture(video_source)
         ret, frame_preview = cap_preview.read()
         if ret:
-            video_placeholder.image(cv2.resize(frame_preview, (640, 360)), channels="BGR", use_container_width=True)
+            main_placeholder.image(cv2.resize(frame_preview, (640, 360)), channels="BGR", use_container_width=True)
         cap_preview.release()
 
 with col2:
-    st.subheader("Telemetrické Parametre & Výpočty")
+    st.subheader("Takticky Mikro-Vyrez (ROI)")
+    zoom_placeholder = st.empty()
+    
+    st.subheader("Telemetria a Vypocty (LIVE)")
     telemetry_placeholder = st.empty()
-    
-    # Statický popis algoritmu
-    st.markdown("""
-    ### Použité matematické modely:
-    
-    1. **Smerový Vektor Odchýlky (Error $e_x, e_y$):**
-       $$e_x = x_{target} - x_{center}, \\quad e_y = y_{target} - y_{center}$$
-       Tento vektor definuje vzdialenosť zameraného objektu od stredu kamery. Využíva ho PID regulátor na korekciu náklonu drona.
-       
-    2. **Lineárny Prediktor (Smerová extrapolácia):**
-       $$\hat{x}_{t+1} = x_t + \\frac{1}{N} \sum_{i=1}^{N} (x_i - x_{i-1})$$
-       Odhaduje nasledujúcu polohu objektu pri jeho čiastočnej oklúzii (keď prejde za prekážku).
-       
-    3. **RL Funkcia Odmeny (Reward Function):**
-       $$R = 2.5 \\cdot C - 0.0015 \\cdot \\sqrt{e_x^2 + e_y^2}$$
-       *Kde $C$ je Confidence (istota detekcie).* Agent v modeli posilňovaného učenia je motivovaný držať objekt v strede záberu a minimalizovať stratu kontaktu.
-    """)
 
-start_button = st.button("Spustiť analýzu a vygenerovať plynulé 30 FPS video")
+# Predpripravené statické okná pred štartom
+SEARCH_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
+cv2.putText(SEARCH_SCREEN, "SEARCHING...", (25, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
+
+start_button = st.button("Spustiť aktívne sledovanie")
 
 # ==============================================================================
-# SPRACOVANIE A GENEROVANIE PLYNULÉHO MP4 VIDEOSTREAMU
+# ŽIVÝ CYKLUS - SYNCHRONIZOVANÉ LIVE VYKRESLENIE VŠETKÝCH PANELOV
 # ==============================================================================
 if start_button:
     cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
-        st.error("Chyba pri otváraní zdrojového videa.")
+        st.error("Chyba pri otváraní video streamu.")
     else:
-        # Nastavenie výstupného video súboru
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Použitie štandardného kodeku
-        out = cv2.VideoWriter(output_video, fourcc, 30.0, (640, 360))
-        
         CENTER_X, CENTER_Y = 640 // 2, 360 // 2
         predictor = TrajectoryPredictor()
         occlusion_counter = 0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        current_frame_idx = 0
+        frame_skip = 2  # Spracovávame každú 2. snímku pre zachovanie plynulosti a live odozvy
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        # Telemetrická štatistika, ktorú vypíšeme na konci
-        telemetry_logs = []
-        frame_idx = 0
-        
-        status_text.warning("AI spracováva video, kreslí zameriavacie boxy a prepočítava telemetriu...")
-        
+        PRED_SCREEN = np.zeros((150, 150, 3), dtype=np.uint8)
+        cv2.putText(PRED_SCREEN, "PREDICTING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
             
-            frame_idx += 1
-            progress_bar.progress(min(frame_idx / total_frames, 1.0))
+            current_frame_idx += 1
+            if current_frame_idx % frame_skip != 0:
+                continue
             
             web_frame = cv2.resize(frame, (640, 360))
             found = False
-            
-            # Detekcia YOLOv8
-            results = model(web_frame, imgsz=320, verbose=False)
+
+            # Inferenčný krok YOLOv8 (imgsz=160 extrémne zrýchli beh na CPU pre live odozvu)
+            results = model(web_frame, imgsz=160, verbose=False)
             
             for box in results[0].boxes:
+                # 0 = person v datasete COCO
                 if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.35:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     conf = float(box.conf[0])
@@ -154,25 +137,33 @@ if start_button:
                     err_x, err_y = cx - CENTER_X, cy - CENTER_Y
                     reward = evaluate_reward(err_x, err_y, conf)
                     
-                    # Vykreslenie priamo do videa, ktoré sa ukladá
+                    # Vykreslenie zameriavacieho kríža a boxu do hlavného videa
                     cv2.rectangle(web_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(web_frame, f"TRACKING PERSON {conf:.2f}", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                    # Vykreslenie kríža uprostred kamery (zameriavač UAV)
+                    cv2.putText(web_frame, f"ID_0: PERSON {conf:.2f}", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
                     cv2.drawMarker(web_frame, (CENTER_X, CENTER_Y), (255, 0, 0), cv2.MARKER_CROSS, 20, 1)
                     cv2.line(web_frame, (CENTER_X, CENTER_Y), (cx, cy), (0, 0, 255), 1)
                     
-                    telemetry_logs.append({
-                        "Čas (Snímka)": f"{frame_idx}",
-                        "Stav UAV": "TRACKING ACTIVE",
-                        "Confidence": f"{conf:.2%}",
-                        "Odchýlka [X, Y]":f"[{err_x}px, {err_y}px]",
-                        "RL Reward (Odmena)": f"{reward:+.4f}"
-                    })
+                    # LIVE aktualizácia taktického výrezu ROI
+                    crop = web_frame[max(0, y1-15):min(360, y2+15), max(0, x1-15):min(640, x2+15)]
+                    if crop.size > 0:
+                        zoom_placeholder.image(cv2.resize(crop, (150, 150)), channels="BGR")
+                        
+                    # LIVE aktualizácia telemetrických parametrov a prepočtov
+                    telemetry_placeholder.markdown(f"""
+* **Stav UAV:** `TRACKING ACTIVE` 
+* **Confidence (Istota AI):** `{conf:.2%}` 
+* **Regulačná odchýlka $e_x, e_y$:** `X: {err_x}px | Y: {err_y}px`
+* **Euklidovská vzdialenosť:** `{np.sqrt(err_x**2 + err_y**2):.2f}px`
+* **RL Reward (Odmena pre agenta):** `{reward:+.4f}`
+***
+**Matematický výpočet odmeny:**
+$$R = (2.5 \\cdot {conf:.2f}) - (0.0015 \\cdot {np.sqrt(err_x**2 + err_y**2):.2f}) = {reward:+.4f}$$
+""")
                     found = True
                     occlusion_counter = 0
-                    break
+                    break  # Sledujeme prioritne jedného človeka v zábere
 
-            # Lineárna predikcia pri výpadku zamerania (oklúzia)
+            # Logika prediktívneho filtra pri oklúzii (prekážke / strate vizuálneho kontaktu)
             if not found:
                 prediction = predictor.predict_next()
                 if prediction and occlusion_counter < 30:
@@ -180,44 +171,34 @@ if start_button:
                     px, py = prediction
                     predictor.update(px, py)
                     
+                    # Vykreslenie predpovedaného bodu žltou farbou
                     cv2.circle(web_frame, (px, py), 10, (0, 255, 255), 2)
                     cv2.putText(web_frame, f"PREDIKCIA ({occlusion_counter})", (px+15, py), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                     cv2.drawMarker(web_frame, (CENTER_X, CENTER_Y), (255, 0, 0), cv2.MARKER_CROSS, 20, 1)
                     
-                    telemetry_logs.append({
-                        "Čas (Snímka)": f"{frame_idx}",
-                        "Stav UAV": f"PREDIKCIA ({occlusion_counter}/30)",
-                        "Confidence": "0.00%",
-                        "Odchýlka [X, Y]": f"[{px - CENTER_X}px, {py - CENTER_Y}px]",
-                        "RL Reward (Odmena)": "0.0000"
-                    })
+                    zoom_placeholder.image(PRED_SCREEN, channels="BGR")
+                    telemetry_placeholder.markdown(f"""
+* **Stav UAV:** `PREDIKCIA (ZÁKRYT)` 
+* **Snímky naslepo:** `{occlusion_counter} / 30`
+* **Predpovedaná poloha:** `X: {px}px | Y: {py}px`
+* **Regulačná odchýlka:** `X: {px - CENTER_X}px | Y: {py - CENTER_Y}px`
+* **RL Reward (Odmena pre agenta):** `0.0000` (Penalizácia za stratu priameho vizuálneho kontaktu)
+""")
                 else:
                     predictor.reset()
-                    cv2.putText(web_frame, "VYHLADAVANIE...", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    cv2.drawMarker(web_frame, (CENTER_X, CENTER_Y), (255, 0, 0), cv2.MARKER_CROSS, 20, 1)
-                    
-                    telemetry_logs.append({
-                        "Čas (Snímka)": f"{frame_idx}",
-                        "Stav UAV": "SEARCHING",
-                        "Confidence": "0.00%",
-                        "Odchýlka [X, Y]": "N/A",
-                        "RL Reward (Odmena)": "N/A"
-                    })
+                    zoom_placeholder.image(SEARCH_SCREEN, channels="BGR")
+                    telemetry_placeholder.markdown("""
+* **Stav UAV:** `VYHLADAVANIE / SEARCHING` 
+* **Confidence (Istota AI):** `0.00%`
+* **Regulačná odchýlka:** `N/A`
+* **RL Reward (Odmena pre agenta):** `N/A`
+""")
             
-            # Zapíšeme upravenú snímku do nového MP4 videa
-            out.write(web_frame)
+            # LIVE prekreslenie hlavného optického streamu na obrazovke
+            main_placeholder.image(web_frame, channels="BGR", use_container_width=True)
+            
+            # Veľmi krátka pauza (10ms) na uvoľnenie sieťového vlákna pre prehliadač
+            time.sleep(0.01)
             
         cap.release()
-        out.release()
-        
-        progress_bar.empty()
-        status_text.empty()
-        st.success("Analýza úspešne dokončená. Video je pripravené v 30 FPS!")
-        
-        # HTML5 prehrávač, ktorý prehrá video v perfektnej plynulosti 30 FPS
-        video_placeholder.video(output_video)
-        
-        # Zobrazenie celej telemetrickej tabuľky s presnými prepočtami pre každú sekundu videa
-        with telemetry_placeholder.container():
-            st.write("#### Nametraná telemetria pre každú snímku:")
-            st.dataframe(telemetry_logs, use_container_width=True, height=300)
+        st.success("Sledovanie úspešne dokončené.")
