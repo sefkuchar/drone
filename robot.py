@@ -55,8 +55,18 @@ if st.button("Spustiť video a live výpočty"):
         st.error("Nepodarilo sa otvoriť video súbor.")
     else:
         CENTER_X, CENTER_Y = 640 // 2, 360 // 2
-        
+                
+        frame_count = 0
         while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
+            
+            frame_count += 1
+            # Spracujeme len každú 4. snímku, ostatné preskočíme
+            if frame_count % 4 != 0: 
+                continue
+                
+            # ... tu pokračuje tvoj kód pre YOLO a výpočty ...            
             ret, frame = cap.read()
             if not ret:
                 break # Koniec videa
