@@ -1,59 +1,146 @@
+import streamlit as st
 import cv2
 import numpy as np
+import os
+import urllib.request
 import math
+import time
 from ultralytics import YOLO
 
-# 1. Načítanie modelu a videa
-model = YOLO("yolov8n.pt")
-cap = cv2.VideoCapture("test_video.mp4")
+# ==============================================================================
+# 1. NASTAVENIE STRÁNKY
+# ==============================================================================
+st.set_page_config(page_title="UAV Live Tracking", layout="wide")
+st.title("UAV Live Tracking Platform")
+st.markdown("---")
 
-# Nastavenie výstupného videa
-width = 640
-height = 360
-fps = 30
-fourcc = cv2.VideoWriter_fourcc(*'mp4v') # mp4v je najkompatibilnejší formát
-out = cv2.VideoWriter('vysledok_uav.mp4', fourcc, fps, (width, height))
+# Príprava videa
+VIDEO_PATH = "test_video.mp4"
+VIDEO_URL = "https://raw.githubusercontent.com/intel-iot-devkit/sample-videos/master/people-detection.mp4"
 
-print("Generujem video... Prosím čakaj, kým sa dokončí proces.")
+if not os.path.exists(VIDEO_PATH):
+    with st.spinner("Sťahujem testovacie video pre simuláciu..."):
+        urllib.request.urlretrieve(VIDEO_URL, VIDEO_PATH)
 
-CENTER_X, CENTER_Y = width // 2, height // 2
+# Ultra rýchle načítanie YOLO modelu
+@st.cache_resource
+def load_model():
+    model = YOLO("yolov8n.pt")
+    model.to("cpu")
+    return model
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+model = load_model()
+
+# ==============================================================================
+# 2. ROZLOŽENIE STRÁNKY (ROZDELENÉ UI)
+# ==============================================================================
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.subheader("Hlavný Optický Stream (Live)")
+    video_placeholder = st.empty()
+
+with col2:
+    st.subheader("Taktický Výrez (ROI)")
+    roi_placeholder = st.empty()
     
-    # Zmenšenie pre rýchlosť a štandardizáciu
-    frame = cv2.resize(frame, (width, height))
-    
-    results = model(frame, imgsz=160, verbose=False)
-    person_detected = False
-    
-    for box in results[0].boxes:
-        if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.4:
-            person_detected = True
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
-            
-            # Výpočty
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            err_x = cx - CENTER_X
-            err_y = cy - CENTER_Y
-            dist = math.sqrt(err_x**2 + err_y**2)
-            reward = (conf * 2.5) - (dist * 0.0015)
-            
-            # Kreslenie
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.line(frame, (CENTER_X, CENTER_Y), (cx, cy), (0, 0, 255), 2)
-            
-            # Zápis do videa
-            cv2.putText(frame, f"Conf: {conf:.2f}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            cv2.putText(frame, f"E_x: {err_x} E_y: {err_y}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(frame, f"Score: {reward:.2f}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            break
-            
-    out.write(frame)
+    st.subheader("Telemetria a Výpočty")
+    math_placeholder = st.empty()
 
-cap.release()
-out.release()
-print("Hotovo! Súbor 'vysledok_uav.mp4' je pripravený na odoslanie.")
+# Inicializácia prázdneho výrezu pred spustením
+empty_roi = np.zeros((150, 150, 3), dtype=np.uint8)
+cv2.putText(empty_roi, "CAKAM NA START", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+roi_placeholder.image(empty_roi, channels="BGR")
+
+math_placeholder.markdown("""
+* **Stav:** `PRIPRAVENÝ`
+* Klikni na tlačidlo nižšie pre spustenie misie.
+""")
+
+# ==============================================================================
+# 3. SPUSTENIE SIMULÁCIE
+# ==============================================================================
+if st.button("Spustiť aktívne sledovanie"):
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    
+    if not cap.isOpened():
+        st.error("Chyba: Nepodarilo sa otvoriť video súbor.")
+    else:
+        CENTER_X, CENTER_Y = 480 // 2, 270 // 2
+        frame_idx = 0
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break # Koniec videa
+            
+            frame_idx += 1
+            # OPTIMALIZÁCIA: Preskočíme každú druhú snímku, aby sme eliminovali sekanie na cloudu
+            if frame_idx % 2 != 0:
+                continue
+            
+            # OPTIMALIZÁCIA: Zmenšenie videa na 480x270 (výrazne zrýchli prenos cez web)
+            frame = cv2.resize(frame, (480, 270))
+            
+            # OPTIMALIZÁCIA: YOLO beží na rozlíšení len 128px (extrémne rýchly beh na CPU)
+            results = model(frame, imgsz=128, verbose=False)
+            person_detected = False
+            
+            for box in results[0].boxes:
+                # 0 = trieda 'person' v YOLO
+                if int(box.cls[0]) == 0 and float(box.conf[0]) > 0.4:
+                    person_detected = True
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    conf = float(box.conf[0])
+                    
+                    # Matematické výpočty odchýlky
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    err_x = cx - CENTER_X
+                    err_y = cy - CENTER_Y
+                    distance = math.sqrt(err_x**2 + err_y**2)
+                    reward = (conf * 2.5) - (distance * 0.0015)
+                    
+                    # Kreslenie do hlavného videa
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.drawMarker(frame, (CENTER_X, CENTER_Y), (255, 0, 0), cv2.MARKER_CROSS, 15, 1)
+                    cv2.line(frame, (CENTER_X, CENTER_Y), (cx, cy), (0, 0, 255), 1)
+                    
+                    # Taktický výrez (ROI)
+                    roi = frame[max(0, y1-15):min(270, y2+15), max(0, x1-15):min(480, x2+15)]
+                    if roi.size > 0:
+                        roi_placeholder.image(cv2.resize(roi, (150, 150)), channels="BGR")
+                    
+                    # Aktualizácia telemetrie napravo
+                    math_placeholder.markdown(f"""
+* **Stav:** `ZAMERANÉ`
+* **Istota AI:** `{conf:.2%}`
+* **Odchýlka $e_x, e_y$:** `X: {err_x}px | Y: {err_y}px`
+* **Vzdialenosť:** `{distance:.2f}px`
+* **RL Skóre:** `{reward:+.4f}`
+
+**Rovnica pre agenta:**
+$$R = ({conf:.2f} \\cdot 2.5) - ({distance:.2f} \\cdot 0.0015)$$
+""")
+                    break # Sledujeme iba prvú osobu
+            
+            if not person_detected:
+                # Ak nikoho nevidí, kreslíme len zameriavací kríž UAV
+                cv2.drawMarker(frame, (CENTER_X, CENTER_Y), (255, 0, 0), cv2.MARKER_CROSS, 15, 1)
+                
+                searching_roi = np.zeros((150, 150, 3), dtype=np.uint8)
+                cv2.putText(searching_roi, "HLADAM...", (40, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                roi_placeholder.image(searching_roi, channels="BGR")
+                
+                math_placeholder.markdown("""
+* **Stav:** `HĽADANIE CIEĽA...`
+* **Istota AI:** `0.00%`
+""")
+
+            # Odoslanie optimalizovanej snímky na web
+            video_placeholder.image(frame, channels="BGR", use_container_width=True)
+            
+            # Drobná pauza na stabilizáciu toku dát (cca 20 FPS v reáli)
+            time.sleep(0.01)
+            
+        cap.release()
+        st.success("Misia úspešne dokončená.")
