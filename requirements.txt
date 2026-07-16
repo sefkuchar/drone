@@ -9,4 +9,3 @@ yt-dlp
 imageio
 imageio-ffmpeg
 av
-cv2
