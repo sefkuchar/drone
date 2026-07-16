@@ -14,14 +14,8 @@ from ultralytics import YOLO
 st.set_page_config(page_title="UAV Tracking - Bakalárska práca", layout="wide")
 st.title("UAV Autonómne Sledovacie Rozhranie")
 
-# Vložíme vysvetlenie priamo pod nadpis
-st.markdown("""
-### Cieľ práce:
-Systém implementuje **vizuálnu servovú slučku**, ktorá v reálnom čase deteguje objekt (človeka) a vypočítava odchýlku od optickej osi pre autonómne riadenie dronu.
-""")
-
 # ==============================================================================
-# WEBRTC ENGINE (BEZ ZMENY)
+# WEBRTC ENGINE
 # ==============================================================================
 VIDEO_PATH = "vtest.avi"
 VIDEO_URL = "https://raw.githubusercontent.com/opencv/opencv/master/samples/data/vtest.avi"
@@ -71,19 +65,24 @@ webrtc_streamer(key="uav-stream", mode=WebRtcMode.RECVONLY,
                 video_frame_callback=video_frame_callback)
 
 # ==============================================================================
-# LEGENDA METRÍK (TOTO SA ZOBRAZÍ POD VIDEOM)
+# ODBORNÝ TEXT BAKALÁRSKEJ PRÁCE
 # ==============================================================================
 st.markdown("---")
-st.subheader("Vysvetlenie telemetrických veličín")
-col1, col2 = st.columns(2)
+st.markdown("""
+Tento projekt predstavuje moderný prístup k automatizovanému sledovaniu cieľov pomocou bezpilotných prostriedkov (UAV). V kontexte bakalárskej práce nejde len o "ukazovanie videa", ale o implementáciu systému pre **vizuálnu servovú slučku**.
 
-with col1:
-    st.markdown("""
-    * **Odchýlka (Error X, Y):** Vzdialenosť cieľa od stredu obrazu (v pixeloch). Používa sa ako vstup pre PID reguláciu dronu.
-    * **Vzdialenosť:** Euklidovská vzdialenosť od stredu, indikujúca mieru vyosenia cieľa.
-    """)
-with col2:
-    st.markdown("""
-    * **Istota (Confidence):** Úspešnosť klasifikácie neurónovou sieťou YOLOv8 (v %).
-    * **RL Skóre (Reward):** Vypočítaná odmena pre agenta podľa vzorca: $R = (conf \\cdot 2.5) - (dist \\cdot 0.0015)$.
-    """)
+### 🧠 Čo kód robí (Logika systému)
+1. **Vstupný stream:** Pomocou knižnice `aiortc` a `WebRTC` prijímame video v reálnom čase. Toto je kritické, pretože bežné metódy prenosu videa na webe majú vysoké oneskorenie (latenciu).
+2. **Spracovanie obrazu (YOLO):** Model YOLOv8n (YOLO - *You Only Look Once*) analyzuje každú snímku. Jeho úlohou je v reálnom čase lokalizovať človeka a vrátiť súradnice ohraničujúceho rámčeka (Bounding Box).
+3. **Matematická analýza (HUD):** Program vypočíta, ako ďaleko je cieľ od stredu záberu kamery.
+4. **Vizualizácia:** Všetky informácie sa v reálnom čase vykresľujú do tzv. HUD (Heads-Up Display) – virtuálneho prístrojového panela, ktorý simuluje ovládacie rozhranie skutočného dronu.
+
+### 📊 Vysvetlenie kľúčových veličín
+* **Odchýlka (Error $e_x, e_y$):** Toto je vzdialenosť cieľa od stredu obrazu v pixeloch. Ak je $e_x = 0$ a $e_y = 0$, cieľ je presne v strede (na optickej osi kamery). Tieto hodnoty by v reálnom systéme slúžili ako vstup pre PID regulátor na natočenie dronu.
+* **Vzdialenosť (Distance):** Ide o Euklidovskú vzdialenosť v 2D priestore obrazu definovanú vzorcom $d = \\sqrt{e_x^2 + e_y^2}$. Hovorí nám, ako ďaleko je cieľ od ideálnej pozície.
+* **Istota (Confidence):** Hodnota od 0 do 1, ktorú vracia YOLO model. Vyjadruje pravdepodobnosť, že detegovaný objekt je skutočne človek.
+* **RL Skóre (Reward):** V bakalárskej práci simulujeme "odmenu" (Reward) pre agenta. Vychádza zo vzorca: $R = (conf \\cdot 2.5) - (distance \\cdot 0.0015)$. Vysoká istota zvyšuje skóre, zatiaľ čo veľká vzdialenosť od stredu skóre znižuje, čím penalizuje agenta za to, že cieľ "uteká" zo záberu.
+
+### 🎓 Cieľ bakalárskej práce
+V bakalárskej práci týmto demonštruješ schopnosť prepojiť počítačové videnie s robotikou. Cieľom je navrhnúť systém, ktorý dokáže autonómne identifikovať človeka a udržať ho v strede zorného poľa kamery bez nutnosti manuálneho pilotovania. Ďalším dôležitým aspektom je optimalizácia pre edge computing, kde ukazuješ, že dokážeš prispôsobiť komplexnú neurónovú sieť tak, aby bežala na obmedzenom hardvéri v reálnom čase s vysokou snímkovou frekvenciou. Celý projekt tak slúži ako dôkaz, že rozumieš tomu, ako sa surové dáta z kamery transformujú na reálne fyzikálne hodnoty, ktoré môže autonómny stroj použiť na svoje riadenie.
+""")
