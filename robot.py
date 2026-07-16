@@ -86,7 +86,10 @@ webrtc_streamer(
 
 st.markdown("---")
 st.markdown("""
-### Logika systému
+### Status projektu: Proof of Concept
+Aktuálne zobrazená aplikácia je funkčný prototyp, ktorý overuje schopnosť neurónovej siete YOLOv8n v reálnom čase detekovať objekt a vypočítať jeho odchýlku od stredu záberu. 
+
+### Logika
 1. Vstupný stream: Pomocou knižnice aiortc a WebRTC prijímame video v reálnom čase.
 2. Spracovanie obrazu: Model YOLOv8n analyzuje každú snímku. Našou úlohou je v reálnom čase lokalizovať človeka a vrátiť súradnice ohraničujúceho rámčeka.
 3. Matematická analýza: Program vypočíta, ako ďaleko je cieľ od stredu záberu kamery.
@@ -96,13 +99,25 @@ st.markdown("""
 V kóde sledujeme metriky, ktoré určujú kvalitu a presnosť sledovania:
 
 * **Odchýlka ($e_x, e_y$):** Predstavuje vzdialenosť cieľa od stredu obrazu v pixeloch. Ak sú hodnoty nulové, cieľ sa nachádza presne na optickej osi kamery. Tieto hodnoty slúžia ako vstup pre PID regulátor na natočenie dronu.
-* **Vzdialenosť ($d$):** Ide o Euklidovskú vzdialenosť v dvojrozmernom priestore obrazu definovanú vzorcom:
-    $$d = \\sqrt{e_x^2 + e_y^2}$$
+* **Vzdialenosť ($d$):** Ide o Euklidovskú vzdialenosť v dvojrozmernom priestore obrazu definovanú vzorcom: 
+$$d = \\sqrt{e_x^2 + e_y^2}$$
 * **Istota ($conf$):** Ide o hodnotu od 0 do 1, ktorú vracia model YOLO. Vyjadruje pravdepodobnosť, že detegovaný objekt je skutočne človek.
-* **RL Skóre ($R$):** V práci simulujeme odmenu pre agenta, ktorú vypočítavame podľa vzorca:
-    $$R = (conf \\cdot 2.5) - (d \\cdot 0.0015)$$
-    Vysoká istota zvyšuje skóre, zatiaľ čo veľká vzdialenosť od stredu skóre znižuje, čím penalizujeme agenta za to, že cieľ uniká zo záberu.
+* **RL Skóre ($R$):** V práci simulujeme odmenu pre agenta, ktorú vypočítavame podľa vzorca: 
+$$R = (conf \\cdot 2.5) - (d \\cdot 0.0015)$$
+Vysoká istota zvyšuje skóre, zatiaľ čo veľká vzdialenosť od stredu skóre znižuje, čím penalizujeme agenta za to, že cieľ uniká zo záberu.
 
-### Cieľ bakalárskej práce
-Naším cieľom je navrhnúť systém, ktorý dokáže autonómne identifikovať človeka a udržať ho v strede zorného poľa kamery bez nutnosti manuálneho pilotovania. Ďalším dôležitým aspektom je optimalizácia pre edge computing, kde ukazujeme, že dokážeme prispôsobiť komplexnú neurónovú sieť tak, aby bežala na obmedzenom hardvéri v reálnom čase s vysokou frekvenciou. Celý projekt tak slúži ako dôkaz, že rozumieme tomu, ako sa surové dáta z kamery transformujú na reálne fyzikálne hodnoty, ktoré môže autonómny stroj použiť na svoje riadenie.
+### Cieľ a zameranie bakalárskej práce
+Bakalárska práca nadväzuje na tento prototyp a zameriava sa na tri piliere:
+
+1. **Optimalizácia spracovania videa:** Cieľom je implementovať techniky pre zníženie latencie a efektívne využitie hardvérových prostriedkov, aby systém bežal s čo najvyššou snímkovou frekvenciou aj na palubnom počítači drona.
+2. **Implementácia riadiacej slučky (PID regulácia):** Cieľom je navrhnúť systém, ktorý vypočítanú odchýlku premení na riadiace povely.
+3. **Autonómna správa stavov:** Cieľom je vytvoriť logiku, ktorá definuje správanie drona v prípade straty cieľa. Systém bude schopný autonómne zahájiť vyhľadávací manéver, cieľ znovu lokalizovať a vrátiť sa do módu sledovania.
+
+### Metodika dosiahnutia cieľov
+
+* **Matematické modelovanie:** Zadefinovanie prenosovej funkcie, ktorá popíše vzťah medzi vizuálnou odchýlkou a potrebným náklonom dronu.
+* **Simulácia:** Overenie stabilitu riadiacej slučky v simulovanom prostredí, kde môžeme bezpečne ladiť parametre regulátora pred nasadením na reálny hardvér.
+* **Hardvérová implementácia:** Nasadenie systemu na palubný počítač, ktorý zabezpečí spracovanie obrazu a riadenie drona v reálnom čase.
+
+Celkovým cieľom práce je transformovať tento prototyp na ucelený autonómny systém, ktorý dokáže sledovať človeka v dynamických prostredi.
 """)
