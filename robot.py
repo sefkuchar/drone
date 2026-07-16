@@ -11,8 +11,8 @@ from ultralytics import YOLO
 # ==============================================================================
 # KONFIGURÁCIA A UI STRÁNKY
 # ==============================================================================
-st.set_page_config(page_title="UAV Profi Tracking", layout="wide")
-st.title("UAV Autonómne Sledovacie Rozhranie")
+st.set_page_config(page_title="Proof of concept", layout="wide")
+st.title("Proof of concept - bakalárska práca")
 st.markdown("---")
 
 VIDEO_PATH = "vtest.avi"
@@ -86,15 +86,13 @@ webrtc_streamer(
 
 st.markdown("---")
 st.markdown("""
-Tento projekt predstavuje moderný prístup k automatizovanému sledovaniu cieľov pomocou bezpilotných prostriedkov. V kontexte našej bakalárskej práce nejde len o spracovanie videa, ale o implementáciu systému pre vizuálnu servovú slučku.
-
 ### Logika systému
-1. Vstupný stream: Pomocou knižnice aiortc a WebRTC prijímame video v reálnom čase. Toto je kritické, pretože bežné metódy prenosu videa na webe majú vysoké oneskorenie.
+1. Vstupný stream: Pomocou knižnice aiortc a WebRTC prijímame video v reálnom čase.
 2. Spracovanie obrazu: Model YOLOv8n analyzuje každú snímku. Našou úlohou je v reálnom čase lokalizovať človeka a vrátiť súradnice ohraničujúceho rámčeka.
 3. Matematická analýza: Program vypočíta, ako ďaleko je cieľ od stredu záberu kamery.
-4. Vizualizácia: Všetky informácie vykresľujeme v reálnom čase do takzvaného HUD panelu, ktorý simuluje ovládacie rozhranie skutočného dronu.
+4. Vizualizácia: Všetky informácie vykresľujeme v reálnom čase do HUD panelu, ktorý simuluje ovládacie rozhranie skutočného dronu.
 
-### Vysvetlenie kľúčových veličín
+### Vysvetlenie veličín
 V kóde sledujeme metriky, ktoré určujú kvalitu a presnosť sledovania:
 
 * **Odchýlka ($e_x, e_y$):** Predstavuje vzdialenosť cieľa od stredu obrazu v pixeloch. Ak sú hodnoty nulové, cieľ sa nachádza presne na optickej osi kamery. Tieto hodnoty slúžia ako vstup pre PID regulátor na natočenie dronu.
@@ -106,5 +104,5 @@ V kóde sledujeme metriky, ktoré určujú kvalitu a presnosť sledovania:
     Vysoká istota zvyšuje skóre, zatiaľ čo veľká vzdialenosť od stredu skóre znižuje, čím penalizujeme agenta za to, že cieľ uniká zo záberu.
 
 ### Cieľ bakalárskej práce
-V našej bakalárskej práci demonštrujeme schopnosť prepojiť počítačové videnie s robotikou. Naším cieľom je navrhnúť systém, ktorý dokáže autonómne identifikovať človeka a udržať ho v strede zorného poľa kamery bez nutnosti manuálneho pilotovania. Ďalším dôležitým aspektom je optimalizácia pre edge computing, kde ukazujeme, že dokážeme prispôsobiť komplexnú neurónovú sieť tak, aby bežala na obmedzenom hardvéri v reálnom čase s vysokou snímkovou frekvenciou. Celý projekt tak slúži ako dôkaz, že rozumieme tomu, ako sa surové dáta z kamery transformujú na reálne fyzikálne hodnoty, ktoré môže autonómny stroj použiť na svoje riadenie.
+Naším cieľom je navrhnúť systém, ktorý dokáže autonómne identifikovať človeka a udržať ho v strede zorného poľa kamery bez nutnosti manuálneho pilotovania. Ďalším dôležitým aspektom je optimalizácia pre edge computing, kde ukazujeme, že dokážeme prispôsobiť komplexnú neurónovú sieť tak, aby bežala na obmedzenom hardvéri v reálnom čase s vysokou frekvenciou. Celý projekt tak slúži ako dôkaz, že rozumieme tomu, ako sa surové dáta z kamery transformujú na reálne fyzikálne hodnoty, ktoré môže autonómny stroj použiť na svoje riadenie.
 """)
