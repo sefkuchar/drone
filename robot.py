@@ -1,7 +1,11 @@
+import os
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+
+import cv2
+
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av
-import cv2
 import numpy as np
 import urllib.request
 import os
