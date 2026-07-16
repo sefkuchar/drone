@@ -2,10 +2,6 @@ streamlit
 streamlit-webrtc
 opencv-python-headless
 ultralytics
-torch
-torchvision
-numpy
-yt-dlp
-imageio
-imageio-ffmpeg
 av
+aiortc
+numpy
