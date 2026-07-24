@@ -8,9 +8,6 @@ import os
 import math
 from ultralytics import YOLO
 
-# ==============================================================================
-# KONFIGURÁCIA A UI STRÁNKY
-# ==============================================================================
 st.set_page_config(page_title="UAV Profi Tracking", layout="wide")
 st.title("UAV Autonómne Sledovacie Rozhranie")
 st.markdown("---")
@@ -19,7 +16,7 @@ VIDEO_PATH = "vtest.avi"
 VIDEO_URL = "https://raw.githubusercontent.com/opencv/opencv/master/samples/data/vtest.avi"
 
 if not os.path.exists(VIDEO_PATH):
-    with st.spinner("Sťahujem vtest.avi..."):
+    with st.spinner("Stahujem vtest.avi..."):
         urllib.request.urlretrieve(VIDEO_URL, VIDEO_PATH)
 
 @st.cache_resource
@@ -28,9 +25,6 @@ def load_model():
 
 model = load_model()
 
-# ==============================================================================
-# ENGINE PRE WEBRTC
-# ==============================================================================
 def create_player():
     from aiortc.contrib.media import MediaPlayer
     return MediaPlayer(VIDEO_PATH)
@@ -73,9 +67,6 @@ def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
     final_frame = np.hstack((img, hud))
     return av.VideoFrame.from_ndarray(final_frame, format="bgr24")
 
-# ==============================================================================
-# STREAMER & DOKUMENTÁCIA
-# ==============================================================================
 webrtc_streamer(
     key="uav-stream",
     mode=WebRtcMode.RECVONLY,
